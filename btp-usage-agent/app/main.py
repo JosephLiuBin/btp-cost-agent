@@ -77,15 +77,6 @@ def main(host: str, port: int):
     except Exception as exc:
         logger.warning("auto_instrument() failed (non-fatal): %s", exc)
 
-    # Log credential status at startup for debugging
-    aicore_client_id = os.environ.get("AICORE_CLIENT_ID", "")
-    aicore_base_url = os.environ.get("AICORE_BASE_URL", "")
-    if not aicore_client_id or aicore_client_id.startswith("<"):
-        logger.warning("AICORE_CLIENT_ID is missing or still a placeholder: '%s'", aicore_client_id)
-    else:
-        logger.info("AICORE_CLIENT_ID loaded: %s...", aicore_client_id[:8])
-    logger.info("AICORE_BASE_URL: %s", aicore_base_url or "(not set)")
-
     # Pre-fetch SAP orchestration deployment URL and cache it at class level
     # (fixes JSONDecodeError: new instance created per call, @cached_property never re-used)
     _patch_sap_deployment_url()

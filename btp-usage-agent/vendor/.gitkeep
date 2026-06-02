@@ -1,0 +1,4 @@
+# This directory is intentionally empty.
+# The platform Dockerfile copies vendor* into the build image.
+# No local wheel overrides are needed — all dependencies are installed
+# directly from PyPI via sfw uv pip install.

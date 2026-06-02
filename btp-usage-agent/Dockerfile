@@ -17,10 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
-# Copy .env for local/testing use — credentials loaded by load_dotenv() at startup.
-# NOTE: For production, remove this line and inject credentials via runtime env vars
-# (Kubernetes Secrets, BTP service bindings, or `docker run -e`).
-COPY .env* ./
+# Copy .env and .env.example into the image so credentials are available at runtime
+COPY .env .env.example ./
 
 # Run the agent
 CMD ["python", "app/main.py", "--host", "0.0.0.0", "--port", "5000"]
