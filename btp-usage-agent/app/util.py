@@ -63,6 +63,7 @@ def enhance_tool_description(mcp_tool: Any) -> str:
 
     return enhanced_description
 
+
 def enhance_tool_name(mcp_tool: Any) -> str:
     """Get enhanced and namespaced tool name, sanitized to match ^[a-zA-Z0-9-_]+$ and at most 64 chars.
 
@@ -156,8 +157,6 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
                 _call_result = await agw_client.call_mcp_tool(
                     tool=mcp_tool,
                     **kwargs,
-                    # TODO: Add user token support when authentication is available
-                    # user_token=user_token,
                 )
                 logger.debug(f"call_mcp_tool_with_retry: SDK call completed for {mcp_tool.name}")
             except (ExceptionGroup, BaseExceptionGroup) as eg:
@@ -192,7 +191,7 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
                     f"call_mcp_tool_with_retry: Response from {mcp_tool.name} truncated from "
                     f"{len(result)} to {MCP_MAX_RESPONSE_CHARS} chars to prevent OOM"
                 )
-                result = result[:MCP_MAX_RESPONSE_CHARS] + """\n...[truncated]"""
+                result = result[:MCP_MAX_RESPONSE_CHARS] + "\n...[truncated]"
 
             logger.info(f"MCP tool '{mcp_tool.name}' returned successfully (response length: {len(result)} chars)")
             return result

@@ -42,7 +42,7 @@ class TestA2AEndpoints:
             card_data = json.loads(raw)
         except ValueError as e:
             pytest.fail(
-                f"""Agent card endpoint returned invalid JSON: {e}\nResponse text: {raw[:200]}"""
+                f"Agent card endpoint returned invalid JSON: {e}\nResponse text: {raw[:200]}"
             )
 
         # Validate it's a proper agent card with required fields
@@ -55,7 +55,7 @@ class TestA2AEndpoints:
         skills = card_data.get("skills") or []
         skill_names = [s.get("name", s.get("id", "?")) for s in skills]
         print(
-            """\n--- Agent card ---\nname: {}\ndescription: {}\nskills: {}\n------------------""".format(
+            "\n--- Agent card ---\nname: {}\ndescription: {}\nskills: {}\n------------------".format(
                 name, description, ", ".join(skill_names) if skill_names else "(none)"
             )
         )

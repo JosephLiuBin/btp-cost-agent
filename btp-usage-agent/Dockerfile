@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 
 # Copy .env and .env.example into the image so credentials are available at runtime
-COPY .env .env.example ./
+COPY .env.example ./
 
 # Run the agent
 CMD ["python", "app/main.py", "--host", "0.0.0.0", "--port", "5000"]

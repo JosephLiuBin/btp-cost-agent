@@ -86,7 +86,12 @@ def main(host: str, port: int):
         name="btp-usage-agent",
         description="A Joule AI agent that helps BTP administrators query and analyze daily subaccount usage for SAP HANA Cloud, AI Core, Cloud Foundry Runtime, and Integration Suite via the SAP UAS Reporting API",
         tags=["btp", "usage", "monitoring", "hana", "aicore"],
-        examples=["Show me HANA Cloud usage for last week", "今天的BTP用量是多少？", "Compare AI Core token usage for May 2026", "What services consumed the most resources this month?"],
+        examples=[
+            "Show me HANA Cloud usage for last week",
+            "今天的BTP用量是多少？",
+            "Compare AI Core token usage for May 2026",
+            "What services consumed the most resources this month?",
+        ],
     )
     agent_card = AgentCard(
         name="btp-usage-agent",

@@ -35,11 +35,11 @@ def set_aicore_config() -> None:
     """Read VCAP_SERVICES and populate AICORE_* environment variables.
 
     Environment variables set (only when not already present):
-      AICORE_AUTH_URL            – token endpoint (with /oauth/token appended)
-      AICORE_CLIENT_ID           – OAuth2 client ID
-      AICORE_CLIENT_SECRET       – OAuth2 client secret
-      AICORE_BASE_URL            – AI Core API base URL
-      AICORE_RESOURCE_GROUP      – resource group (default: "default")
+      AICORE_AUTH_URL            → token endpoint (with /oauth/token appended)
+      AICORE_CLIENT_ID           → OAuth2 client ID
+      AICORE_CLIENT_SECRET       → OAuth2 client secret
+      AICORE_BASE_URL            → AI Core API base URL
+      AICORE_RESOURCE_GROUP      → resource group (default: "default")
 
     This mirrors the behaviour of the real sap-cloud-sdk function so that
     LiteLLM's SAP provider can discover credentials automatically.

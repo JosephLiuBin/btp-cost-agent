@@ -27,7 +27,7 @@ from langchain_core.tools import tool
 load_dotenv(override=False)  # no-op in container; runtime env vars take priority
 logger = logging.getLogger(__name__)
 
-# ─── OAuth2 token cache ────────────────────────────────────────────────────────
+# ── OAuth2 token cache ───────────────────────────────────────────────────────
 _token_cache: dict = {"token": None, "expires_at": 0.0}
 
 
@@ -59,7 +59,7 @@ async def _get_token() -> str:
     return _token_cache["token"]
 
 
-# ─── Date helpers ──────────────────────────────────────────────────────────────
+# ── Date helpers ─────────────────────────────────────────────────────────────
 def _to_uas_date(iso_date: str) -> str:
     """YYYY-MM-DD → YYYYMMDD (UAS API format)."""
     return iso_date.replace("-", "")
@@ -108,7 +108,7 @@ def _yesterday() -> str:
     return (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-# ─── Service classification ────────────────────────────────────────────────────
+# ── Service classification ───────────────────────────────────────────────────
 _SERVICE_GROUPS = {
     "hana":        ["hana-cloud"],
     "aicore":      ["aicore", "ai-core"],
@@ -125,20 +125,93 @@ def _classify(service_id: str) -> str:
     return "other"
 
 
-# ─── Core API call ─────────────────────────────────────────────────────────────
+# ── Core API call ─────────────────────────────────────────────────────────────
+def _week_chunks(from_date: str, to_date: str) -> list[tuple[str, str]]:
+    """Split a date range into 7-day weekly chunks to avoid large single API requests.
+
+    Each chunk covers exactly 7 days, except the last which may be shorter.
+    E.g. 2026-01-01 → 2026-01-20 yields:
+        (2026-01-01, 2026-01-07)
+        (2026-01-08, 2026-01-14)
+        (2026-01-15, 2026-01-20)
+    """
+    chunks: list[tuple[str, str]] = []
+    start = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end   = datetime.strptime(to_date,   "%Y-%m-%d").date()
+
+    current = start
+    while current <= end:
+        chunk_end = min(current + timedelta(days=6), end)
+        chunks.append((current.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+        current = chunk_end + timedelta(days=1)
+
+    return chunks
+
+
+# How many days before we split the request into weekly chunks.
+_CHUNK_THRESHOLD_DAYS = 60
+
+# HTTP timeout for a single UAS API request (seconds).
+# Large date ranges can return thousands of records — give the API enough time.
+_HTTP_TIMEOUT_SECONDS = 120
+
+
 async def _fetch_usage(from_date: str, to_date: str) -> list[dict]:
     """
     Call UAS API and return flat list of usage records.
 
-    Response item fields:
-      serviceId, serviceName, plan, planName,
-      measureId, metricName, unitSingular, usage,
-      startIsoDate, categoryName, dataCenter,
-      spaceName, instanceId
+    For date ranges wider than _CHUNK_THRESHOLD_DAYS the range is
+    automatically split into monthly chunks so that each individual
+    HTTP request stays small and well within the server's response window.
+
+    Response item fields (verified against live API 2026-05):
+      globalAccountId, globalAccountName,
+      subaccountId, subaccountName,
+      directoryId, directoryName,
+      serviceId, serviceName,
+      plan, planName,
+      periodStartDate, periodEndDate,
+      environmentInstanceId, environmentInstanceName,
+      spaceId, spaceName,
+      instanceId,
+      measureId, metricName, unitSingular, unitPlural,
+      identityZone, dataCenter, dataCenterName,
+      usage, categoryId, categoryName,
+      startIsoDate, endIsoDate,
+      application          ← model name for ai-core CU records
+                             (e.g. "gpt-4o-2024-08-06",
+                                   "anthropic--claude-4.6-opus-1")
+                             NOTE: spaceName is None for ai-core; plan is
+                             always "extended" — neither encodes the model.
     """
-    uas_url      = os.environ.get("BTP_UAS_URL", "https://uas-reporting.cfapps.eu10.hana.ondemand.com")
-    subaccount   = os.environ["BTP_SUBACCOUNT_ID"]
-    token        = await _get_token()
+    # Decide whether to chunk
+    d_from = datetime.strptime(from_date, "%Y-%m-%d")
+    d_to   = datetime.strptime(to_date,   "%Y-%m-%d")
+    span_days = (d_to - d_from).days
+
+    if span_days > _CHUNK_THRESHOLD_DAYS:
+        logger.info(
+            "Date range spans %d days (> %d threshold) — fetching in weekly chunks.",
+            span_days, _CHUNK_THRESHOLD_DAYS,
+        )
+        all_records: list[dict] = []
+        for chunk_from, chunk_to in _week_chunks(from_date, to_date):
+            chunk_records = await _fetch_usage_single(chunk_from, chunk_to)
+            logger.info(
+                "  chunk %s → %s: %d records", chunk_from, chunk_to, len(chunk_records)
+            )
+            all_records.extend(chunk_records)
+        logger.info("Total records across all chunks: %d", len(all_records))
+        return all_records
+
+    return await _fetch_usage_single(from_date, to_date)
+
+
+async def _fetch_usage_single(from_date: str, to_date: str) -> list[dict]:
+    """Perform a single UAS API HTTP request for the given date range."""
+    uas_url    = os.environ.get("BTP_UAS_URL", "https://uas-reporting.cfapps.eu10.hana.ondemand.com")
+    subaccount = os.environ["BTP_SUBACCOUNT_ID"]
+    token      = await _get_token()
 
     url    = f"{uas_url}/reports/v1/subaccountUsage"
     params = {
@@ -149,7 +222,13 @@ async def _fetch_usage(from_date: str, to_date: str) -> list[dict]:
     }
     logger.info("UAS GET %s  params=%s", url, params)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    timeout = httpx.Timeout(
+        connect=15.0,           # time to establish TCP connection
+        read=_HTTP_TIMEOUT_SECONDS,  # time to receive the full response body
+        write=15.0,
+        pool=15.0,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(
             url,
             params=params,
@@ -162,7 +241,7 @@ async def _fetch_usage(from_date: str, to_date: str) -> list[dict]:
     return records if isinstance(records, list) else []
 
 
-# ─── LangChain Tools ───────────────────────────────────────────────────────────
+# ── LangChain Tools ───────────────────────────────────────────────────────────
 
 @tool
 async def get_btp_usage(
@@ -177,12 +256,12 @@ async def get_btp_usage(
         from_date: Start date in YYYY-MM-DD format (e.g. "2026-05-01")
         to_date: End date in YYYY-MM-DD format (e.g. "2026-05-31")
         service_filter: Filter results. One of:
-            "all"         – all services (default)
-            "hana"        – SAP HANA Cloud only
-            "aicore"      – SAP AI Core only
-            "cf"          – Cloud Foundry Runtime only
-            "integration" – SAP Integration Suite only
-            "key"         – all 4 key services above
+            "all"         → all services (default)
+            "hana"        → SAP HANA Cloud only
+            "aicore"      → SAP AI Core only
+            "cf"          → Cloud Foundry Runtime only
+            "integration" → SAP Integration Suite only
+            "key"         → all 4 key services above
 
     Returns:
         JSON string with usage records. Each record contains:
@@ -211,17 +290,20 @@ async def get_btp_usage(
     # Normalise to a clean, LLM-friendly format
     rows = [
         {
-            "service":    r.get("serviceName") or r.get("serviceId", ""),
-            "serviceId":  r.get("serviceId", ""),
-            "plan":       r.get("planName") or r.get("plan", ""),
-            "metric":     r.get("metricName") or r.get("measureId", ""),
-            "measureId":  r.get("measureId", ""),
-            "usage":      r.get("usage", 0),
-            "unit":       r.get("unitSingular") or r.get("unitPlural", ""),
-            "date":       r.get("startIsoDate", ""),
-            "category":   r.get("categoryName", ""),
-            "dataCenter": r.get("dataCenter", ""),
-            "space":      r.get("spaceName") or "",
+            "service":     r.get("serviceName") or r.get("serviceId", ""),
+            "serviceId":   r.get("serviceId", ""),
+            "plan":        r.get("planName") or r.get("plan", ""),
+            "metric":      r.get("metricName") or r.get("measureId", ""),
+            "measureId":   r.get("measureId", ""),
+            "usage":       r.get("usage", 0),
+            "unit":        r.get("unitSingular") or r.get("unitPlural", ""),
+            "date":        r.get("startIsoDate", ""),
+            "category":    r.get("categoryName", ""),
+            "dataCenter":  r.get("dataCenter", ""),
+            "space":       r.get("spaceName") or "",
+            # For ai-core CU records this field carries the model name,
+            # e.g. "gpt-4o-2024-08-06", "anthropic--claude-4.6-opus-1"
+            "application": r.get("application") or "",
         }
         for r in records
     ]
@@ -232,6 +314,882 @@ async def get_btp_usage(
         "service_filter": filt,
         "total_records":  len(rows),
         "records":        rows,
+    }, ensure_ascii=False)
+
+
+def _time_bucket(iso_date: str, granularity: str) -> str:
+    """Return a time-bucket key from a YYYY-MM-DD date string.
+
+    granularity:
+      "day"   → "YYYY-MM-DD"  (unchanged)
+      "month" → "YYYY-MM"
+    """
+    if not iso_date:
+        return "unknown"
+    if granularity == "month":
+        return iso_date[:7]   # "YYYY-MM"
+    return iso_date           # "YYYY-MM-DD"
+
+
+@tool
+async def get_aicore_model_cu_usage(
+    from_date: str,
+    to_date: str,
+    time_granularity: str = "none",
+) -> str:
+    """
+    Calculate SAP AI Core Capacity Unit (CU) consumption broken down by AI model.
+
+    Filters the UAS data to only records where:
+      - serviceId  == "ai-core"
+      - measureId  == "capacity_units"
+
+    The UAS API returns an `application` field on these records that carries
+    the exact AI model name, e.g. "gpt-4o-2024-08-06",
+    "anthropic--claude-4.6-opus-1", "mistralai--mistral-small-instruct-2503".
+    This is the correct dimension to group by — NOT spaceName (always None for
+    ai-core CU records) and NOT plan (always "extended").
+
+    The optional `time_granularity` parameter controls whether the result is
+    collapsed into a single period total or broken down by day / month.
+
+    Args:
+        from_date:        Start date in YYYY-MM-DD format (e.g. "2026-05-01")
+        to_date:          End date in YYYY-MM-DD format (e.g. "2026-05-31")
+        time_granularity: How to bucket time.  One of:
+            "none"  → collapse entire date range into one total per model (default)
+            "day"   → break down by calendar day   (YYYY-MM-DD)
+            "month" → break down by calendar month (YYYY-MM)
+
+    Returns:
+        JSON with:
+          - by_model:
+              time_granularity == "none"  →  list of
+                  { model, total_cu }
+                  sorted descending by total_cu  (answers "which model uses most CU?")
+              time_granularity == "day"|"month"  →  list of
+                  { model, total_cu, time_breakdown: [{period, cu}, …] }
+                  sorted descending by total_cu; time_breakdown sorted ascending by period
+          - by_period  (only when time_granularity != "none"):
+              list of { period, total_cu } across all models,
+              sorted ascending by period — useful for trend / chart views
+          - grand_total_cu:    sum of all CU in the period
+          - record_count:      number of raw records matched
+          - filtered_records:  raw AI Core CU records (for audit / debugging)
+    """
+    # ── 1. Validate inputs ───────────────────────────────────────────────────
+    from_date = _validate_date(from_date, "from_date")
+    to_date   = _validate_date(to_date,   "to_date")
+    if from_date > to_date:
+        logger.warning("from_date %s > to_date %s — swapping.", from_date, to_date)
+        from_date, to_date = to_date, from_date
+
+    tg = (time_granularity or "none").lower()
+    if tg not in ("none", "day", "month"):
+        logger.warning("Unknown time_granularity=%r — defaulting to 'none'.", tg)
+        tg = "none"
+
+    # ── 2. Fetch raw usage ───────────────────────────────────────────────────
+    try:
+        records = await _fetch_usage(from_date, to_date)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "from_date": from_date, "to_date": to_date})
+
+    # ── 3. Filter: serviceId == "ai-core" AND measureId == "capacity_units" ─
+    cu_records = [
+        r for r in records
+        if r.get("serviceId", "").lower() == "ai-core"
+        and r.get("measureId", "").lower() == "capacity_units"
+    ]
+
+    if not cu_records:
+        return json.dumps({
+            "from_date":        from_date,
+            "to_date":          to_date,
+            "time_granularity": tg,
+            "message":          "No AI Core capacity_units records found in the given period.",
+            "by_model":         [],
+            "grand_total_cu":   0,
+            "record_count":     0,
+            "filtered_records": [],
+        }, ensure_ascii=False)
+
+    # ── 4. Normalise raw records ─────────────────────────────────────────────
+    # `application` is the field in the live UAS response that carries the
+    # AI model name (verified against real API data, May 2026).
+    # spaceName is always None and plan is always "extended" for these records.
+    filtered_records = [
+        {
+            "model":       r.get("application") or "unknown",
+            "cu":          float(r.get("usage", 0)),
+            "date":        r.get("startIsoDate", ""),
+            "dataCenter":  r.get("dataCenter", ""),
+            "instanceId":  r.get("instanceId", ""),
+        }
+        for r in cu_records
+    ]
+
+    grand_total_cu = round(sum(r["cu"] for r in filtered_records), 6)
+
+    # ── 5. Aggregate by model (+ optional time bucket) ───────────────────────
+    # key: (model, period)  where period == "" when tg == "none"
+    agg: dict[tuple[str, str], float] = {}
+    for r in filtered_records:
+        model  = r["model"]
+        period = _time_bucket(r["date"], tg) if tg != "none" else ""
+        key    = (model, period)
+        agg[key] = round(agg.get(key, 0.0) + r["cu"], 6)
+
+    # ── 6. Build by_model view ───────────────────────────────────────────────
+    model_totals: dict[str, float] = {}
+    model_breakdown: dict[str, dict[str, float]] = {}   # model → period → cu
+
+    for (model, period), cu in agg.items():
+        model_totals[model] = round(model_totals.get(model, 0.0) + cu, 6)
+        if tg != "none":
+            model_breakdown.setdefault(model, {})
+            model_breakdown[model][period] = round(
+                model_breakdown[model].get(period, 0.0) + cu, 6
+            )
+
+    if tg == "none":
+        by_model = sorted(
+            [{"model": m, "total_cu": total} for m, total in model_totals.items()],
+            key=lambda x: -x["total_cu"],
+        )
+    else:
+        by_model = sorted(
+            [
+                {
+                    "model":          m,
+                    "total_cu":       total,
+                    "time_breakdown": sorted(
+                        [{"period": p, "cu": cu}
+                         for p, cu in model_breakdown.get(m, {}).items()],
+                        key=lambda x: x["period"],
+                    ),
+                }
+                for m, total in model_totals.items()
+            ],
+            key=lambda x: -x["total_cu"],
+        )
+
+    # ── 7. Build by_period view (only when time is not collapsed) ────────────
+    result: dict = {
+        "from_date":        from_date,
+        "to_date":          to_date,
+        "time_granularity": tg,
+        "record_count":     len(filtered_records),
+        "grand_total_cu":   grand_total_cu,
+        "by_model":         by_model,
+        "filtered_records": filtered_records,
+    }
+
+    if tg != "none":
+        period_totals: dict[str, float] = {}
+        for (_, period), cu in agg.items():
+            if period:
+                period_totals[period] = round(period_totals.get(period, 0.0) + cu, 6)
+
+        result["by_period"] = sorted(
+            [{"period": p, "total_cu": cu} for p, cu in period_totals.items()],
+            key=lambda x: x["period"],
+        )
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
+async def simulate_aicore_cu_eom_forecast(
+    reference_date: Optional[str] = None,
+) -> str:
+    """
+    Forecast AI Core Capacity Unit (CU) consumption by end of the current month.
+
+    Uses three independent projection methods and combines them into an ensemble:
+
+      1. Linear       — average daily rate over all elapsed days of the month
+                        projected forward to fill the remaining days.
+      2. Trend (7d)   — same as linear, but the daily rate is computed from the
+                        most recent 7 days only.  More responsive to sudden
+                        acceleration or deceleration in usage.
+      3. Historical   — fetches the previous month's full CU total and its
+                        partial total up to the same day-of-month, then applies
+                        the ratio  (prev_full / prev_partial)  to the current
+                        month's total so far.  Best when usage follows a
+                        repeating monthly pattern.
+
+      Ensemble        — weighted average of whichever methods are available.
+                        Historical gets higher weight (0.4) when at least 14
+                        days of prior-month data exist at the reference point;
+                        otherwise methods share equal weight.
+
+    NOTE: The UAS API delivers data with a ~1-day lag, so "today" may not yet
+    appear in the records.  The tool automatically detects the last date that
+    has data and uses that as the end of the observed window.
+
+    Args:
+        reference_date: Treat this date as "today" (YYYY-MM-DD).
+                        Defaults to today's UTC date.
+                        Pass a past date for what-if / back-testing.
+
+    Returns:
+        JSON with:
+          context        — calendar info: reference_date, month_start, month_end,
+                           days_in_month, last_data_date, data_days_elapsed,
+                           days_remaining
+          current_month  — cu_so_far, daily_breakdown [{date, cu}],
+                           by_model [{model, cu_so_far, forecast_linear_cu}]
+          previous_month — prev_month_label, prev_full_cu,
+                           prev_partial_cu (up to same day-of-month),
+                           prev_partial_days  (null when no prev data)
+          forecasts      — linear, trend_7d, historical (null if unavailable),
+                           ensemble; each entry has forecast_cu and
+                           method_description
+          record_count   — number of raw AI Core CU records used
+    """
+    from calendar import monthrange
+
+    # ── 1. Resolve reference date ────────────────────────────────────────────
+    today_utc = datetime.now(tz=timezone.utc).date()
+    if reference_date:
+        try:
+            ref = datetime.strptime(reference_date, "%Y-%m-%d").date()
+            if ref > today_utc:
+                logger.warning("reference_date %s is in the future — clamping to today.", reference_date)
+                ref = today_utc
+        except ValueError:
+            logger.warning("Invalid reference_date %r — using today.", reference_date)
+            ref = today_utc
+    else:
+        ref = today_utc
+
+    # ── 2. Build current-month window ────────────────────────────────────────
+    month_start = ref.replace(day=1)
+    days_in_month = monthrange(ref.year, ref.month)[1]
+    month_end = ref.replace(day=days_in_month)
+    # Fetch up to ref (inclusive); API lag means ref itself may have no data
+    fetch_to = min(ref, today_utc)
+    month_start_str = month_start.strftime("%Y-%m-%d")
+    fetch_to_str    = fetch_to.strftime("%Y-%m-%d")
+
+    # ── 3. Build previous-month window ───────────────────────────────────────
+    if month_start.month == 1:
+        prev_month_start = month_start.replace(year=month_start.year - 1, month=12, day=1)
+    else:
+        prev_month_start = month_start.replace(month=month_start.month - 1)
+    prev_days_in_month = monthrange(prev_month_start.year, prev_month_start.month)[1]
+    prev_month_end = prev_month_start.replace(day=prev_days_in_month)
+    prev_month_start_str = prev_month_start.strftime("%Y-%m-%d")
+    prev_month_end_str   = prev_month_end.strftime("%Y-%m-%d")
+
+    # ── 4. Fetch data (current month + previous month) ───────────────────────
+    try:
+        cur_records_raw  = await _fetch_usage(month_start_str, fetch_to_str)
+        prev_records_raw = await _fetch_usage(prev_month_start_str, prev_month_end_str)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "reference_date": str(ref)})
+
+    def _filter_cu(records: list[dict]) -> list[dict]:
+        return [
+            r for r in records
+            if r.get("serviceId", "").lower() == "ai-core"
+            and r.get("measureId", "").lower() == "capacity_units"
+        ]
+
+    cur_cu  = _filter_cu(cur_records_raw)
+    prev_cu = _filter_cu(prev_records_raw)
+
+    # ── 5. Build per-day aggregates for current month ────────────────────────
+    # day_totals: date_str → total CU that day
+    day_totals: dict[str, float] = {}
+    model_totals: dict[str, float] = {}
+    for r in cur_cu:
+        d     = r.get("startIsoDate", "")
+        cu    = float(r.get("usage", 0))
+        model = r.get("application") or "unknown"
+        if d:
+            day_totals[d]    = round(day_totals.get(d, 0.0)    + cu, 6)
+            model_totals[model] = round(model_totals.get(model, 0.0) + cu, 6)
+
+    daily_breakdown = sorted(
+        [{"date": d, "cu": cu} for d, cu in day_totals.items()],
+        key=lambda x: x["date"],
+    )
+
+    cu_so_far = round(sum(day_totals.values()), 6)
+
+    # Last date with actual data
+    if daily_breakdown:
+        last_data_date = daily_breakdown[-1]["date"]
+        data_days_elapsed = datetime.strptime(last_data_date, "%Y-%m-%d").day
+    else:
+        last_data_date    = None
+        data_days_elapsed = 0
+
+    days_remaining = days_in_month - data_days_elapsed
+
+    # ── 6. Recent-7d daily rate ──────────────────────────────────────────────
+    recent_window = 7
+    recent_days = daily_breakdown[-recent_window:] if len(daily_breakdown) >= 1 else []
+    recent_cu   = sum(d["cu"] for d in recent_days)
+    recent_n    = len(recent_days)  # actual days with data in the window
+
+    # ── 7. Previous-month partial (up to same day-of-month) ─────────────────
+    prev_day_totals: dict[str, float] = {}
+    for r in prev_cu:
+        d  = r.get("startIsoDate", "")
+        cu = float(r.get("usage", 0))
+        if d:
+            prev_day_totals[d] = round(prev_day_totals.get(d, 0.0) + cu, 6)
+
+    prev_full_cu = round(sum(prev_day_totals.values()), 6)
+
+    # Partial: same day-of-month cutoff as data_days_elapsed
+    prev_partial_cu = round(sum(
+        cu for d, cu in prev_day_totals.items()
+        if datetime.strptime(d, "%Y-%m-%d").day <= data_days_elapsed
+    ), 6)
+    prev_partial_days = data_days_elapsed if prev_day_totals else None
+
+    # ── 8. Compute forecasts ─────────────────────────────────────────────────
+    forecasts: dict = {}
+
+    if data_days_elapsed > 0:
+        # Method 1: Linear
+        avg_daily = cu_so_far / data_days_elapsed
+        f_linear  = round(cu_so_far + avg_daily * days_remaining, 6)
+        forecasts["linear"] = {
+            "forecast_cu":        f_linear,
+            "avg_daily_rate":     round(avg_daily, 6),
+            "method_description": (
+                f"Average daily CU over the {data_days_elapsed} elapsed day(s) "
+                f"({round(avg_daily, 4)} CU/day) projected across the remaining "
+                f"{days_remaining} day(s)."
+            ),
+        }
+
+        # Method 2: Trend 7d
+        if recent_n > 0:
+            trend_daily = recent_cu / recent_n
+            f_trend     = round(cu_so_far + trend_daily * days_remaining, 6)
+            forecasts["trend_7d"] = {
+                "forecast_cu":          f_trend,
+                "recent_7d_daily_rate": round(trend_daily, 6),
+                "recent_days_used":     recent_n,
+                "method_description": (
+                    f"Daily rate from the last {recent_n} day(s) with data "
+                    f"({round(trend_daily, 4)} CU/day) projected across the remaining "
+                    f"{days_remaining} day(s)."
+                ),
+            }
+        else:
+            forecasts["trend_7d"] = None
+
+        # Method 3: Historical ratio
+        if prev_partial_cu > 0:
+            ratio   = prev_full_cu / prev_partial_cu
+            f_hist  = round(cu_so_far * ratio, 6)
+            forecasts["historical"] = {
+                "forecast_cu":          f_hist,
+                "prev_month_label":     prev_month_start.strftime("%Y-%m"),
+                "prev_full_cu":         prev_full_cu,
+                "prev_partial_cu":      prev_partial_cu,
+                "prev_month_ratio":     round(ratio, 6),
+                "method_description": (
+                    f"Previous month ({prev_month_start.strftime('%Y-%m')}) reached "
+                    f"{prev_full_cu} CU total; by day {data_days_elapsed} it had consumed "
+                    f"{prev_partial_cu} CU (ratio {round(ratio, 4)}×). "
+                    f"Applying that ratio to current {cu_so_far} CU."
+                ),
+            }
+        else:
+            forecasts["historical"] = None
+
+        # Ensemble: weighted average of available methods
+        available: list[tuple[float, float]] = []  # (forecast, weight)
+        if "linear" in forecasts:
+            available.append((f_linear, 1.0))
+        if forecasts.get("trend_7d"):
+            available.append((f_trend, 1.0))
+        if forecasts.get("historical"):
+            # Give historical higher weight when the prior-month sample is ≥14 days
+            hist_weight = 1.4 if data_days_elapsed >= 14 else 1.0
+            available.append((f_hist, hist_weight))
+
+        if available:
+            total_weight = sum(w for _, w in available)
+            f_ensemble   = round(sum(f * w for f, w in available) / total_weight, 6)
+            weight_note  = (
+                "equal weights" if len({w for _, w in available}) == 1
+                else "historical weighted 1.4× (≥14 days of prior-month data available)"
+            )
+            forecasts["ensemble"] = {
+                "forecast_cu":        f_ensemble,
+                "methods_combined":   [k for k in ("linear", "trend_7d", "historical") if forecasts.get(k)],
+                "method_description": (
+                    f"Weighted average of {len(available)} method(s) ({weight_note}). "
+                    "This is the recommended single estimate."
+                ),
+            }
+        else:
+            forecasts["ensemble"] = None
+    else:
+        # No data yet — cannot forecast
+        for key in ("linear", "trend_7d", "historical", "ensemble"):
+            forecasts[key] = None
+
+    # ── 9. Per-model linear forecast ─────────────────────────────────────────
+    by_model_forecast = []
+    if data_days_elapsed > 0:
+        for model, cu in sorted(model_totals.items(), key=lambda x: -x[1]):
+            model_daily = cu / data_days_elapsed
+            by_model_forecast.append({
+                "model":             model,
+                "cu_so_far":         round(cu, 6),
+                "avg_daily_rate":    round(model_daily, 6),
+                "forecast_eom_cu":   round(cu + model_daily * days_remaining, 6),
+            })
+
+    # ── 10. Assemble result ───────────────────────────────────────────────────
+    return json.dumps({
+        "context": {
+            "reference_date":    str(ref),
+            "month_start":       month_start_str,
+            "month_end":         month_end.strftime("%Y-%m-%d"),
+            "days_in_month":     days_in_month,
+            "last_data_date":    last_data_date,
+            "data_days_elapsed": data_days_elapsed,
+            "days_remaining":    days_remaining,
+        },
+        "current_month": {
+            "cu_so_far":       cu_so_far,
+            "daily_breakdown": daily_breakdown,
+            "by_model":        by_model_forecast,
+        },
+        "previous_month": {
+            "prev_month_label":  prev_month_start.strftime("%Y-%m"),
+            "prev_full_cu":      prev_full_cu,
+            "prev_partial_cu":   prev_partial_cu,
+            "prev_partial_days": prev_partial_days,
+        },
+        "forecasts":    forecasts,
+        "record_count": len(cur_cu),
+    }, ensure_ascii=False)
+
+
+# ── Anomaly detection helpers (stdlib only — no numpy/scipy needed) ────────────
+
+def _assess_data_shape(values: list[float]) -> dict:
+    """
+    Inspect a numeric series and decide the best anomaly-detection algorithm.
+
+    Selection rules (applied in order):
+      n < 5              → "insufficient_data"  (too few points)
+      5 ≤ n < 14         → "iqr"               (distribution-free, small sample)
+      n ≥ 14, CV < 1.5
+            & |skew| ≤ 0.5 → "zscore"           (data roughly symmetric/normal)
+      n ≥ 14, otherwise  → "mad"               (robust to right-skewed usage data)
+
+    Returns a dict with stats + "recommended_method" + "reason".
+    """
+    import statistics as _s
+
+    n = len(values)
+    if n == 0:
+        return {
+            "n": 0,
+            "recommended_method": "insufficient_data",
+            "reason": "No data points.",
+        }
+    if n == 1:
+        return {
+            "n": 1,
+            "mean": round(values[0], 6),
+            "median": round(values[0], 6),
+            "std": 0.0,
+            "mad": 0.0,
+            "cv": 0.0,
+            "skewness_proxy": 0.0,
+            "q1": round(values[0], 6),
+            "q3": round(values[0], 6),
+            "iqr": 0.0,
+            "recommended_method": "insufficient_data",
+            "reason": "Only 1 data point.",
+        }
+
+    mean_v   = _s.mean(values)
+    std_v    = _s.stdev(values)
+    median_v = _s.median(values)
+    devs     = [abs(v - median_v) for v in values]
+    mad_v    = _s.median(devs)
+    cv       = std_v / mean_v if mean_v > 0 else 0.0
+    # Pearson's second skewness coefficient proxy: (mean − median) / std
+    skew     = (mean_v - median_v) / std_v if std_v > 0 else 0.0
+
+    sorted_v = sorted(values)
+    # statistics.quantiles returns [Q1, Q2, Q3] for n=4
+    q1, _, q3 = _s.quantiles(sorted_v, n=4)
+    iqr_v    = q3 - q1
+
+    if n < 5:
+        method = "insufficient_data"
+        reason = f"Only {n} data point(s) (need ≥ 5 for reliable detection)."
+    elif n < 14:
+        method = "iqr"
+        reason = (
+            f"{n} data points — IQR fences used (small sample, distribution-free)."
+        )
+    elif cv >= 1.5 or abs(skew) > 0.5:
+        method = "mad"
+        reason = (
+            f"{n} data points; CV={round(cv, 2)}, |skew|={round(abs(skew), 2)} — "
+            "right-skewed usage data detected, MAD (Median Absolute Deviation) selected "
+            "for robustness."
+        )
+    else:
+        method = "zscore"
+        reason = (
+            f"{n} data points; CV={round(cv, 2)}, |skew|={round(abs(skew), 2)} — "
+            "data roughly symmetric, Z-score appropriate."
+        )
+
+    return {
+        "n":                n,
+        "mean":             round(mean_v,   6),
+        "std":              round(std_v,    6),
+        "median":           round(median_v, 6),
+        "mad":              round(mad_v,    6),
+        "cv":               round(cv,       4),
+        "skewness_proxy":   round(skew,     4),
+        "q1":               round(q1,       6),
+        "q3":               round(q3,       6),
+        "iqr":              round(iqr_v,    6),
+        "recommended_method": method,
+        "reason":           reason,
+    }
+
+
+def _run_detection(
+    series: list[tuple[str, float]],
+    shape:  dict,
+    thresholds: dict,
+) -> list[dict]:
+    """
+    Apply the algorithm chosen by _assess_data_shape to a (date, value) series.
+
+    thresholds: {"zscore": float, "iqr_k": float, "mad_k": float}
+    Returns a list of anomaly dicts sorted by |score| descending.
+    """
+    import statistics as _s
+
+    method = shape.get("recommended_method", "insufficient_data")
+    if method == "insufficient_data" or len(series) < 2:
+        return []
+
+    values   = [v for _, v in series]
+    mean_v   = shape["mean"]
+    median_v = shape["median"]
+    std_v    = shape["std"]
+    mad_v    = shape["mad"]
+    q1       = shape["q1"]
+    q3       = shape["q3"]
+    iqr_v    = shape["iqr"]
+
+    anomalies: list[dict] = []
+
+    if method == "zscore":
+        t = thresholds["zscore"]
+        for date, val in series:
+            if std_v > 0:
+                z   = (val - mean_v) / std_v
+                if abs(z) > t:
+                    pct = (val - mean_v) / mean_v * 100 if mean_v > 0 else 0.0
+                    anomalies.append({
+                        "date":        date,
+                        "value":       round(val, 6),
+                        "score":       round(z, 4),
+                        "score_type":  "z-score",
+                        "direction":   "high" if z > 0 else "low",
+                        "mean":        mean_v,
+                        "std":         std_v,
+                        "pct_vs_mean": round(pct, 1),
+                        "reason": (
+                            f"{round(val, 4)} CU is {round(abs(pct), 1)}% "
+                            f"{'above' if z > 0 else 'below'} mean "
+                            f"({mean_v} CU); z={round(z, 2)}"
+                        ),
+                    })
+
+    elif method == "iqr":
+        k     = thresholds["iqr_k"]
+        upper = q3 + k * iqr_v
+        lower = max(0.0, q1 - k * iqr_v)
+        for date, val in series:
+            if val > upper or val < lower:
+                pct = (val - mean_v) / mean_v * 100 if mean_v > 0 else 0.0
+                direction = "high" if val > upper else "low"
+                # Guard: IQR==0 means all baseline values are equal; use
+                # raw distance from fence as score to avoid division by zero.
+                _iqr_denom = iqr_v if iqr_v > 0 else max(abs(q3), 1e-10)
+                anomalies.append({
+                    "date":         date,
+                    "value":        round(val, 6),
+                    "score":        round(
+                        (val - upper) / _iqr_denom if val > upper else (lower - val) / _iqr_denom,
+                        4,
+                    ),
+                    "score_type":   "iqr_distance",
+                    "direction":    direction,
+                    "upper_fence":  round(upper, 6),
+                    "lower_fence":  round(lower, 6),
+                    "pct_vs_mean":  round(pct, 1),
+                    "reason": (
+                        f"{round(val, 4)} CU {'exceeds upper' if direction == 'high' else 'falls below lower'} "
+                        f"IQR fence ({round(upper if direction == 'high' else lower, 4)} CU); "
+                        f"{round(abs(pct), 1)}% {'above' if pct > 0 else 'below'} mean"
+                    ),
+                })
+
+    elif method == "mad":
+        t       = thresholds["mad_k"]
+        # Consistency constant: MAD × 1.4826 ≈ σ for a normal distribution
+        mad_std = mad_v * 1.4826 if mad_v > 0 else 1e-10
+        for date, val in series:
+            mz  = (val - median_v) / mad_std
+            if abs(mz) > t:
+                pct = (val - median_v) / median_v * 100 if median_v > 0 else 0.0
+                anomalies.append({
+                    "date":           date,
+                    "value":          round(val, 6),
+                    "score":          round(mz, 4),
+                    "score_type":     "modified_z-score (MAD)",
+                    "direction":      "high" if mz > 0 else "low",
+                    "median":         median_v,
+                    "mad":            mad_v,
+                    "pct_vs_median":  round(pct, 1),
+                    "reason": (
+                        f"{round(val, 4)} CU is {round(abs(pct), 1)}% "
+                        f"{'above' if mz > 0 else 'below'} median "
+                        f"({median_v} CU); modified-z={round(mz, 2)}"
+                    ),
+                })
+
+    return sorted(anomalies, key=lambda x: -abs(x["score"]))
+
+
+# ── Sensitivity presets ───────────────────────────────────────────────────────
+_SENSITIVITY_PRESETS: dict[str, dict] = {
+    #              z-score  IQR-k  MAD-k
+    "low":    {"zscore": 3.0, "iqr_k": 2.50, "mad_k": 3.5},  # fewer alerts
+    "medium": {"zscore": 2.5, "iqr_k": 1.75, "mad_k": 2.5},  # balanced (default)
+    "high":   {"zscore": 2.0, "iqr_k": 1.50, "mad_k": 2.0},  # more alerts
+}
+
+
+@tool
+async def detect_aicore_cu_anomaly(
+    lookback_days: int = 30,
+    reference_date: Optional[str] = None,
+    sensitivity: str = "medium",
+) -> str:
+    """
+    Detect anomalies in SAP AI Core Capacity Unit (CU) daily consumption.
+
+    Automatically selects the best statistical anomaly-detection algorithm
+    based on the shape of the actual data (sample size, coefficient of
+    variation, skewness):
+
+      < 5 active days    → insufficient data; returns a clear message
+      5–13 active days   → IQR fences          (distribution-free, small sample)
+      ≥ 14 days, CV < 1.5
+           & |skew| ≤ 0.5 → Z-score            (data roughly symmetric/normal)
+      ≥ 14 days, otherwise → MAD               (robust to right-skewed usage)
+
+    Detection runs at two levels:
+      1. Total daily CU   — sum across all models per calendar day.
+      2. Per-model daily CU — independently for each model that has ≥ 5 points.
+
+    Args:
+        lookback_days:  Calendar days to look back from reference_date.
+                        Default 30. Clamped to [7, 90].
+        reference_date: Treat this date as "today" (YYYY-MM-DD).
+                        Defaults to today's UTC date.
+        sensitivity:    "low" (fewer alerts), "medium" (default), "high" (more alerts).
+
+    Returns:
+        JSON with:
+          from_date / to_date         — analysis window
+          sensitivity                 — sensitivity level used
+          data_summary                — record count, active days, daily series
+          data_shape                  — n, mean, std, cv, skew, algorithm + rationale
+          algorithm_used              — name of the chosen algorithm
+          algorithm_rationale         — plain-English explanation
+          total_daily_anomalies       — anomalous days for the combined-total series
+          per_model_anomalies         — dict: model → anomalous days for that model
+          per_model_skipped           — models with < 5 data points (skipped)
+          summary_text                — human-readable chat summary
+    """
+    # ── 1. Resolve dates ─────────────────────────────────────────────────────
+    today_utc = datetime.now(tz=timezone.utc).date()
+    if reference_date:
+        try:
+            ref = datetime.strptime(reference_date, "%Y-%m-%d").date()
+            if ref > today_utc:
+                ref = today_utc
+        except ValueError:
+            ref = today_utc
+    else:
+        ref = today_utc
+
+    lookback_days = max(7, min(90, lookback_days))
+    from_date     = (ref - timedelta(days=lookback_days - 1)).strftime("%Y-%m-%d")
+    to_date       = ref.strftime("%Y-%m-%d")
+
+    # ── 2. Sensitivity thresholds ─────────────────────────────────────────────
+    sens       = (sensitivity or "medium").lower()
+    if sens not in _SENSITIVITY_PRESETS:
+        sens = "medium"
+    thresholds = _SENSITIVITY_PRESETS[sens]
+
+    # ── 3. Fetch data ─────────────────────────────────────────────────────────
+    try:
+        records = await _fetch_usage(from_date, to_date)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "from_date": from_date, "to_date": to_date})
+
+    cu_records = [
+        r for r in records
+        if r.get("serviceId", "").lower() == "ai-core"
+        and r.get("measureId", "").lower() == "capacity_units"
+    ]
+
+    if not cu_records:
+        return json.dumps({
+            "from_date":              from_date,
+            "to_date":                to_date,
+            "sensitivity":            sens,
+            "total_daily_anomalies":  [],
+            "per_model_anomalies":    {},
+            "per_model_skipped":      [],
+            "summary_text": (
+                f"No AI Core capacity_units records found between {from_date} and "
+                f"{to_date}. Cannot detect anomalies."
+            ),
+        }, ensure_ascii=False)
+
+    # ── 4. Aggregate by day ────────────────────────────────────────────────────
+    daily_totals:  dict[str, float]              = {}
+    model_daily:   dict[str, dict[str, float]]   = {}   # model → date → CU
+
+    for r in cu_records:
+        d     = r.get("startIsoDate", "")
+        cu    = float(r.get("usage", 0))
+        model = r.get("application") or "unknown"
+        if d:
+            daily_totals[d]  = round(daily_totals.get(d, 0.0)  + cu, 6)
+            model_daily.setdefault(model, {})
+            model_daily[model][d] = round(model_daily[model].get(d, 0.0) + cu, 6)
+
+    # Sorted (date, total_cu) series for the total-level detection
+    total_series: list[tuple[str, float]] = sorted(daily_totals.items())
+    values_total: list[float]             = [v for _, v in total_series]
+
+    # ── 5. Assess data shape & run total-level detection ──────────────────────
+    total_shape    = _assess_data_shape(values_total)
+    total_anomalies = _run_detection(total_series, total_shape, thresholds)
+
+    # ── 6. Per-model detection ─────────────────────────────────────────────────
+    per_model_anomalies: dict[str, list[dict]] = {}
+    per_model_skipped:   list[str]             = []
+
+    for model, day_map in model_daily.items():
+        model_series = sorted(day_map.items())
+        model_vals   = [v for _, v in model_series]
+        model_shape  = _assess_data_shape(model_vals)
+
+        if model_shape["recommended_method"] == "insufficient_data":
+            per_model_skipped.append(model)
+            continue
+
+        anomalies = _run_detection(model_series, model_shape, thresholds)
+        if anomalies:
+            per_model_anomalies[model] = anomalies
+
+    # ── 7. Build human-readable summary ───────────────────────────────────────
+    method_label = {
+        "zscore":            "Z-score",
+        "iqr":               "IQR fences",
+        "mad":               "MAD (robust)",
+        "insufficient_data": "N/A",
+    }.get(total_shape["recommended_method"], total_shape["recommended_method"])
+
+    n_days         = total_shape["n"]
+    total_anom_cnt = len(total_anomalies)
+    model_anom_cnt = sum(len(v) for v in per_model_anomalies.values())
+    all_anom_cnt   = total_anom_cnt + model_anom_cnt
+
+    if total_shape["recommended_method"] == "insufficient_data":
+        summary = (
+            f"Insufficient data: only {n_days} active day(s) found between "
+            f"{from_date} and {to_date}. At least 5 days are required to detect "
+            f"anomalies reliably."
+        )
+    elif all_anom_cnt == 0:
+        summary = (
+            f"No anomalies detected between {from_date} and {to_date}.\n"
+            f"Algorithm: {method_label} | Sensitivity: {sens} | "
+            f"Active days: {n_days} | "
+            f"Daily total CU range: {round(min(values_total), 4)} – "
+            f"{round(max(values_total), 4)} CU"
+        )
+    else:
+        lines = [
+            f"### AI Core CU Anomaly Report",
+            f"Period: {from_date} → {to_date} | "
+            f"Algorithm: {method_label} | Sensitivity: {sens}",
+            f"**{all_anom_cnt} anomaly(-ies) found**",
+        ]
+        if total_anomalies:
+            lines.append(f"\n**Total daily CU anomalies ({total_anom_cnt}):**")
+            for a in sorted(total_anomalies, key=lambda x: -x["value"]):
+                lines.append(f"  - {a['date']}: **{a['value']} CU** — {a['reason']}")
+        if per_model_anomalies:
+            lines.append(f"\n**Per-model anomalies ({model_anom_cnt}):**")
+            for model, anoms in sorted(per_model_anomalies.items()):
+                for a in sorted(anoms, key=lambda x: -x["value"]):
+                    lines.append(
+                        f"  - [{model}] {a['date']}: **{a['value']} CU** — {a['reason']}"
+                    )
+        if per_model_skipped:
+            lines.append(
+                f"\n_Models skipped (< 5 data points): "
+                f"{', '.join(per_model_skipped)}_"
+            )
+        summary = "\n".join(lines)
+
+    # ── 8. Assemble result ─────────────────────────────────────────────────────
+    return json.dumps({
+        "from_date":   from_date,
+        "to_date":     to_date,
+        "sensitivity": sens,
+        "data_summary": {
+            "total_cu_records": len(cu_records),
+            "days_with_data":   n_days,
+            "min_daily_cu":     round(min(values_total), 6) if values_total else 0.0,
+            "max_daily_cu":     round(max(values_total), 6) if values_total else 0.0,
+            "daily_series":     [
+                {"date": d, "total_cu": round(cu, 6)}
+                for d, cu in total_series
+            ],
+        },
+        "data_shape":         total_shape,
+        "algorithm_used":     total_shape["recommended_method"],
+        "algorithm_rationale": total_shape.get("reason", ""),
+        "total_daily_anomalies":  total_anomalies,
+        "per_model_anomalies":    per_model_anomalies,
+        "per_model_skipped":      per_model_skipped,
+        "summary_text":           summary,
     }, ensure_ascii=False)
 
 

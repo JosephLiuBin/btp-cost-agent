@@ -1,10 +1,13 @@
-# ── Credentials & secrets (NEVER commit these) ────────────────────────────────
+# ── Credentials & secrets (NEVER commit these) ────────────────────────────
 .env
 .env.*
 !.env.example
 *.env
 
-# ── Python ─────────────────────────────────────────────────────────────────────
+# ── Sample / raw API data (may contain sensitive usage info) ─────────────
+sample_data/
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,7 +23,7 @@ dist/
 build/
 *.egg-info/
 
-# ── Testing & coverage ─────────────────────────────────────────────────────────
+# ── Testing & coverage ────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 .coverage.*
@@ -29,13 +32,13 @@ coverage.json
 htmlcov/
 test_report.json
 
-# ── IDEs & editors ─────────────────────────────────────────────────────────────
+# ── IDEs & editors ────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *~
 .DS_Store
 
-# ── Logs ───────────────────────────────────────────────────────────────────────
+# ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/

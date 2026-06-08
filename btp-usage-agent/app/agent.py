@@ -56,6 +56,9 @@ You help BTP admins query and analyze daily subaccount usage by calling the SAP 
 ## Available Tools
 - **get_btp_usage**: Query subaccount usage for a date range. Required: fromDate, toDate (YYYY-MM-DD). Optional: service_filter (hana/aicore/cf/integration/all).
 - **get_btp_services_summary**: Get a grouped summary of services and their total usage for a date range.
+- **get_aicore_model_cu_usage**: AI Core CU consumption broken down by model. Optional time_granularity: none/day/month.
+- **simulate_aicore_cu_eom_forecast**: Forecast AI Core CU consumption by end of the current month using three methods (linear, 7-day trend, historical ratio) plus an ensemble estimate. Optional: reference_date (YYYY-MM-DD, defaults to today). Use whenever the user asks about projected, estimated, or forecasted CU usage for the rest of the month.
+- **detect_aicore_cu_anomaly**: Detect anomalies in AI Core CU daily consumption. Automatically selects the best algorithm (IQR / Z-score / MAD) based on data shape. Optional: lookback_days (default 30, range 7–90), reference_date, sensitivity (low/medium/high). Use whenever the user asks about unusual usage, spikes, anomalies, or outliers in AI Core CU consumption.
 
 ## Key Services You Monitor
 | Service | serviceId | What to watch |
@@ -96,6 +99,7 @@ class AgentResponse:
 
 
 THREAD_TTL_SECONDS = 3600  # evict threads inactive for 1 hour
+
 
 class SampleAgent:
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]

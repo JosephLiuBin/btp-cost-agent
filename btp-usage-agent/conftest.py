@@ -95,7 +95,7 @@ def start_agent(agent_path: Path):
     port = _get_free_port()
     main_file = agent_path / "app" / "main.py"
 
-    print(f"""\n{'=' * 80}\nStarting A2A server on port {port}...\n{'=' * 80}\n""")
+    print(f"\n{'=' * 80}\nStarting A2A server on port {port}...\n{'=' * 80}\n")
 
     # Disable the OpenTelemetry SDK in the server subprocess.
     # stderr=None lets the server write directly to the terminal.
@@ -126,11 +126,11 @@ def start_agent(agent_path: Path):
         process.terminate()
         pytest.fail(f"Server did not become ready on port {port} within 30 s")
 
-    print(f"""\n{'=' * 80}\nA2A server started on http://localhost:{port}\n{'=' * 80}\n""")
+    print(f"\n{'=' * 80}\nA2A server started on http://localhost:{port}\n{'=' * 80}\n")
 
     yield {"process": process, "port": port}
 
-    print(f"""\n{'=' * 80}\nShutting down A2A server on port {port}...\n{'=' * 80}\n""")
+    print(f"\n{'=' * 80}\nShutting down A2A server on port {port}...\n{'=' * 80}\n")
     process.terminate()
     try:
         process.wait(timeout=5)
@@ -138,7 +138,7 @@ def start_agent(agent_path: Path):
         process.kill()
         process.wait()
 
-    print("""A2A server stopped.\n""")
+    print("A2A server stopped.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ def _is_full_run(config: pytest.Config) -> bool:
     ]
 
     if not positional:
-        return True  # no args → full suite via testpaths ini
+        return True  # no args — full suite via testpaths ini
 
     if any("::" in str(a) for a in positional):
         return False  # node-id selection
@@ -315,4 +315,4 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             indent=2,
         )
     )
-    print(f"""\nReport written to {report_path}""")
+    print(f"\nReport written to {report_path}")

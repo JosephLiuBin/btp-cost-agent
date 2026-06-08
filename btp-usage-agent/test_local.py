@@ -36,7 +36,7 @@ def sep(title: str):
 
 def print_records(data: dict, n: int = 6):
     if "error" in data:
-        print(f"  ❌ Error: {data['error']}")
+        print(f"  ✗ Error: {data['error']}")
         return
     recs = data.get("records") or data.get("detail") or []
     print(f"  total_records: {data.get('total_records', len(recs))}")
@@ -49,15 +49,15 @@ def print_records(data: dict, n: int = 6):
         print(f"  [{date}] {svc:<28} | {met:<42} = {str(tot):>10} {unit}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PART 1 – UAS Tools only (no LLM)
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# PART 1 — UAS Tools only (no LLM)
+# ──────────────────────────────────────────────────────────────────────────────
 async def test_tools():
-    sep("Tool Test 1 – get_btp_usage (key services)")
+    sep("Tool Test 1 — get_btp_usage (key services)")
     r = await get_btp_usage.ainvoke({"from_date": MAY_FROM, "to_date": MAY_TO, "service_filter": "key"})
     print_records(json.loads(r))
 
-    sep("Tool Test 2 – get_btp_services_summary")
+    sep("Tool Test 2 — get_btp_services_summary")
     r = await get_btp_services_summary.ainvoke({"from_date": MAY_FROM, "to_date": MAY_TO})
     d = json.loads(r)
     print(f"  services: {d.get('service_count')} | records: {d.get('total_records')}")
@@ -65,9 +65,9 @@ async def test_tools():
         print(f"  {row['service']:<28} | {row['metric']:<40} | total={row['total_usage']:>12} {row['unit']}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PART 2 – Full conversational agent (LLM + tools)
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# PART 2 — Full conversational agent (LLM + tools)
+# ──────────────────────────────────────────────────────────────────────────────
 async def chat(llm_with_tools, tools_map, system_msg: SystemMessage, user_query: str):
     """Single conversational turn: user query → tool call → final answer."""
     print(f"\n💬 User: {user_query}")
@@ -85,7 +85,7 @@ async def chat(llm_with_tools, tools_map, system_msg: SystemMessage, user_query:
         print(f"  🔧 Calling {tc['name']}({tc['args']})")
         result = await tools_map[tc["name"]].ainvoke(tc["args"])
         data   = json.loads(result)
-        print(f"  ✅ {data.get('total_records', data.get('service_count', '?'))} records")
+        print(f"  ✓ {data.get('total_records', data.get('service_count', '?'))} records")
         messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
 
     # Round 2: LLM formulates final answer
@@ -101,17 +101,17 @@ async def test_agent():
     tools_map = {t.name: t for t in tools}
     sys_msg   = SystemMessage(content=get_system_prompt())
 
-    sep("Agent Test 1 – HANA 用量查询（中文）")
-    await chat(llm_wt, tools_map, sys_msg, "五月份 SAP HANA Cloud 存储和计算用量各是多少？请用表格展示。")
+    sep("Agent Test 1 — HANA 用量查询（中文）")
+    await chat(llm_wt, tools_map, sys_msg, "五月份 SAP HANA Cloud 存储和计算用量各是多少，请用表格显示。")
 
-    sep("Agent Test 2 – 服务总览（英文）")
+    sep("Agent Test 2 — 服务总览（英文）")
     await chat(llm_wt, tools_map, sys_msg, "Give me a summary of all BTP services used in May 2026, sorted by total usage.")
 
-    sep("Agent Test 3 – Integration Suite（中文）")
+    sep("Agent Test 3 — Integration Suite（中文）")
     await chat(llm_wt, tools_map, sys_msg, "Integration Suite 在五月份有多少 tenant 实例在运行？")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 async def main():
     await test_tools()
     await test_agent()

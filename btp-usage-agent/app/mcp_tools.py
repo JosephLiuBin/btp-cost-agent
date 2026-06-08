@@ -10,11 +10,23 @@ To add more tools, import and add them to the list returned by get_mcp_tools().
 
 import logging
 
-from uas_tool import get_btp_usage, get_btp_services_summary
+from uas_tool import (
+    get_btp_usage,
+    get_btp_services_summary,
+    get_aicore_model_cu_usage,
+    simulate_aicore_cu_eom_forecast,
+    detect_aicore_cu_anomaly,
+)
 
 logger = logging.getLogger(__name__)
 
-_UAS_TOOLS = [get_btp_usage, get_btp_services_summary]
+_UAS_TOOLS = [
+    get_btp_usage,
+    get_btp_services_summary,
+    get_aicore_model_cu_usage,
+    simulate_aicore_cu_eom_forecast,
+    detect_aicore_cu_anomaly,
+]
 
 
 async def get_mcp_tools(use_cache: bool = True) -> list:

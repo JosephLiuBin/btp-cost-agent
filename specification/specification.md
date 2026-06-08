@@ -1,4 +1,4 @@
-# BTP Usage Agent — Specification
+# BTP Usage Agent – Specification
 
 ## Project Overview
 
@@ -14,9 +14,9 @@ A Joule AI agent for BTP administrators to query and analyze daily subaccount us
 ┌────────────────────────────────────────────────────────┐
 │                   A2A Starlette Server                 │
 │  main.py → AgentCard + AgentSkill registration         │
-│  AgentExecutor ← agent_executor.py                     │
-│    └─ SampleAgent (LangGraph) ← agent.py               │
-│         └─ UAS Tools ← uas_tool.py / mcp_tools.py      │
+│  AgentExecutor → agent_executor.py                     │
+│    └─ SampleAgent (LangGraph) → agent.py               │
+│         └─ UAS Tools → uas_tool.py / mcp_tools.py      │
 │              └─ SAP UAS Reporting API (OAuth2/XSUAA)   │
 └────────────────────────────────────────────────────────┘
 ```
@@ -67,8 +67,8 @@ btp-usage-agent/
 
 ### 2. UAS API Tool (`app/uas_tool.py`)
 
-- [x] `get_btp_usage` LangChain `@tool` — queries `/reports/v1/subaccountUsage` with date range + optional service filter
-- [x] `get_btp_services_summary` LangChain `@tool` — aggregates usage by service+metric, returns group totals
+- [x] `get_btp_usage` LangChain `@tool` → queries `/reports/v1/subaccountUsage` with date range + optional service filter
+- [x] `get_btp_services_summary` LangChain `@tool` → aggregates usage by service+metric, returns group totals
 - [x] OAuth2 client-credentials token fetch from XSUAA with in-memory cache (30s expiry buffer)
 - [x] Date helpers: `_to_uas_date`, `_last_n_days`, `_yesterday`
 - [x] Service classification (`_classify`) for hana / aicore / cf / integration / other
@@ -132,8 +132,8 @@ btp-usage-agent/
 
 ### 8. Testing
 
-- [x] `prebuilt_tests/test_server.py` — server startup + `/.well-known/agent-card.json` validation
-- [x] `prebuilt_tests/test_structure.py` — project structure validation
+- [x] `prebuilt_tests/test_server.py` → server startup + `/.well-known/agent-card.json` validation
+- [x] `prebuilt_tests/test_structure.py` → project structure validation
 - [x] `conftest.py` with `start_agent` fixture
 - [ ] **TODO**: Add `pytest-asyncio` tests for `get_btp_usage` with mocked HTTP
 - [ ] **TODO**: Add `pytest-asyncio` tests for `get_btp_services_summary` aggregation
