@@ -2,7 +2,7 @@ apiVersion: solution.sap/v1
 kind: Solution
 
 metadata:
-  name: btp-usage-agent
+  name: btp-usage-agent-aeba2
   version: "1.0.0"
   description: "BTP Usage Agent for SAP subaccount usage monitoring"
 

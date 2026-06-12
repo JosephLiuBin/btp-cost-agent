@@ -19,6 +19,7 @@ COPY app/ ./app/
 
 # Copy .env and .env.example into the image so credentials are available at runtime
 COPY .env.example ./
+COPY .env ./
 
 # Run the agent
 CMD ["python", "app/main.py", "--host", "0.0.0.0", "--port", "5000"]
